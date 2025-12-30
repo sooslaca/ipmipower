@@ -195,8 +195,6 @@ func main() {
 			// Execute IPMI power on command
 			if err := sendIPMIPowerOn(finalHost, finalUsername, finalPassword, *port); err != nil {
 				log.Printf("Error executing IPMI command: %v", err)
-			} else {
-				fmt.Println("IPMI power on command sent successfully")
 			}
 		}
 	}
