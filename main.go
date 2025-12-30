@@ -2,22 +2,54 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
+	"os"
 	"time"
 
 	"github.com/bougou/go-ipmi"
 )
 
+// getEnvOrDefault returns the value of the environment variable with the given name,
+// or the default value if the environment variable is not set.
+func getEnvOrDefault(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
+}
+
 func main() {
-	// 1. Configuration - Update these with your specific details
-	host := "192.168.0.1" // Your BMC IP address
-	port := 623
-	username := "admin"
-	password := "admin"
+	// Define command line flags
+	var (
+		host     = flag.String("host", "", "BMC IP address (default is IPMI_HOST environment variable)")
+		username = flag.String("username", "", "BMC username (default is IPMI_USERNAME environment variable)")
+		password = flag.String("password", "", "BMC password (default is IPMI_PASSWORD environment variable)")
+		port     = flag.Int("port", 623, "BMC port")
+	)
+
+	// Parse command line flags
+	flag.Parse()
+
+	// Get values from flags, falling back to environment variables if flags are not provided
+	finalHost := *host
+	if finalHost == "" {
+		finalHost = getEnvOrDefault("IPMI_HOST", "192.168.0.1")
+	}
+
+	finalUsername := *username
+	if finalUsername == "" {
+		finalUsername = getEnvOrDefault("IPMI_USERNAME", "admin")
+	}
+
+	finalPassword := *password
+	if finalPassword == "" {
+		finalPassword = getEnvOrDefault("IPMI_PASSWORD", "admin")
+	}
 
 	// 2. Create the Client
-	client, err := ipmi.NewClient(host, port, username, password)
+	client, err := ipmi.NewClient(finalHost, *port, finalUsername, finalPassword)
 	if err != nil {
 		log.Fatalf("Failed to create IPMI client: %v", err)
 	}
@@ -37,7 +69,7 @@ func main() {
 	}
 	defer client.Close(ctx)
 
-	fmt.Printf("Connected to BMC at %s\n", host)
+	fmt.Printf("Connected to BMC at %s\n", finalHost)
 
 	// 5. Check Current Power Status
 	status, err := client.GetChassisStatus(ctx)
