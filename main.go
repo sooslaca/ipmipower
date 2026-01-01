@@ -152,8 +152,6 @@ func main() {
 		log.Fatalf("Invalid MAC address format: %v", err)
 	}
 
-	fmt.Printf("Target MAC address: %s\n", finalMAC)
-
 	// Determine operation mode
 	if *mode == "direct" {
 		// Execute direct IPMI command (original functionality)
