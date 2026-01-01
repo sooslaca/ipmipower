@@ -4,8 +4,10 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"html/template"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -109,6 +111,201 @@ func sendIPMIPowerOn(host string, username string, password string, port int) er
 	return nil
 }
 
+// getPowerStatus gets the current power status of the IPMI host
+func getPowerStatus(host string, username string, password string, port int) (bool, error) {
+	// 2. Create the Client
+	client, err := ipmi.NewClient(host, port, username, password)
+	if err != nil {
+		return false, fmt.Errorf("failed to create IPMI client: %v", err)
+	}
+
+	// 3. Configure for Remote Access
+	// "lanplus" is the standard for RMCP+ (IPMI 2.0) remote management.
+	client.WithMaxPrivilegeLevel(ipmi.PrivilegeLevelOperator)
+	client.WithInterface("lanplus")
+
+	// You can also set a timeout for the network operations
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// 4. Connect and Authenticate
+	if err := client.Connect(ctx); err != nil {
+		return false, fmt.Errorf("failed to establish session: %v", err)
+	}
+	defer client.Close(ctx)
+
+	// 5. Check Current Power Status
+	status, err := client.GetChassisStatus(ctx)
+	if err != nil {
+		return false, fmt.Errorf("failed to get chassis status: %v", err)
+	}
+
+	return status.PowerIsOn, nil
+}
+
+// WebPageData represents the data to be passed to the HTML template
+type WebPageData struct {
+	Host      string
+	Status    string
+	IsPowered bool
+}
+
+// webHandler handles the main web page
+func webHandler(w http.ResponseWriter, r *http.Request) {
+	// Get configuration from environment variables
+	host := getEnvOrDefault("IPMI_HOST", "192.168.0.1")
+	username := getEnvOrDefault("IPMI_USERNAME", "admin")
+	password := getEnvOrDefault("IPMI_PASSWORD", "admin")
+	port := 623 // Default IPMI port
+
+	// Get current power status
+	isPowered, err := getPowerStatus(host, username, password, port)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Error getting power status: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Prepare data for template
+	data := WebPageData{
+		Host:      host,
+		Status:    getStatusString(isPowered),
+		IsPowered: isPowered,
+	}
+
+	// HTML template
+	tmpl := `
+<!DOCTYPE html>
+<html>
+<head>
+    <title>IPMI Power Control</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 600px;
+            margin: 50px auto;
+            padding: 20px;
+            text-align: center;
+        }
+        .status {
+            font-size: 24px;
+            margin: 20px 0;
+            padding: 15px;
+            border-radius: 5px;
+        }
+        .on {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .off {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        button {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            font-size: 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 10px;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        button:disabled {
+            background-color: #6c757d;
+            cursor: not-allowed;
+        }
+        .refresh-btn {
+            background-color: #28a745;
+        }
+        .refresh-btn:hover {
+            background-color: #1e7e34;
+        }
+    </style>
+</head>
+<body>
+    <h1>IPMI Power Control</h1>
+    <div class="status {{if .IsPowered}}on{{else}}off{{end}}">
+        <h2>Host: {{.Host}}</h2>
+        <p>Power Status: <strong>{{.Status}}</strong></p>
+    </div>
+
+    {{if not .IsPowered}}
+        <form method="POST" action="/poweron" style="display: inline;">
+            <button type="submit">Power ON</button>
+        </form>
+    {{else}}
+        <button disabled>Power ON (already on)</button>
+    {{end}}
+
+    <form method="GET" action="/" style="display: inline;">
+        <button type="submit" class="refresh-btn">Refresh Status</button>
+    </form>
+
+    <div style="margin-top: 30px; font-size: 14px; color: #666;">
+        <p>Current time: {{.Time}}</p>
+    </div>
+</body>
+</html>
+`
+
+	// Parse and execute template
+	t, err := template.New("webpage").Parse(tmpl)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Error parsing template: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Add current time to data
+	dataWithTime := struct {
+		WebPageData
+		Time string
+	}{
+		WebPageData: data,
+		Time:        time.Now().Format("2006-01-02 15:04:05"),
+	}
+
+	if err := t.Execute(w, dataWithTime); err != nil {
+		log.Printf("Error executing template: %v", err)
+	}
+}
+
+// powerOnHandler handles the power on command
+func powerOnHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Get configuration from environment variables
+	host := getEnvOrDefault("IPMI_HOST", "192.168.0.1")
+	username := getEnvOrDefault("IPMI_USERNAME", "admin")
+	password := getEnvOrDefault("IPMI_PASSWORD", "admin")
+	port := 623 // Default IPMI port
+
+	// Send power on command
+	err := sendIPMIPowerOn(host, username, password, port)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Error powering on: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Redirect back to main page
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// getStatusString returns a string representation of the power status
+func getStatusString(isPowered bool) string {
+	if isPowered {
+		return "ON"
+	}
+	return "OFF"
+}
+
 func main() {
 	// Define command line flags
 	var (
@@ -119,6 +316,7 @@ func main() {
 		wolPort  = flag.Int("wol-port", 9, "WoL port to listen on")
 		mac      = flag.String("mac", "00:11:22:33:44:55", "Target MAC address to listen for (format: 00-11-22-33-44-55 or 00:11:22:33:44:55)")
 		mode     = flag.String("mode", "wol", "Operation mode: 'wol' for Wake-on-LAN server, 'direct' for direct IPMI command")
+		webPort  = flag.Int("web-port", 80, "Web server port")
 	)
 
 	// Parse command line flags
@@ -160,6 +358,18 @@ func main() {
 		}
 		return
 	}
+
+	// Set up web server routes
+	http.HandleFunc("/", webHandler)
+	http.HandleFunc("/poweron", powerOnHandler)
+
+	// Start web server in a separate goroutine if not in WoL-only mode
+	go func() {
+		fmt.Printf("Starting web server on port %d\n", *webPort)
+		if err := http.ListenAndServe(fmt.Sprintf(":%d", *webPort), nil); err != nil {
+			log.Fatalf("Web server error: %v", err)
+		}
+	}()
 
 	// WoL mode: Listen for magic packets
 	fmt.Printf("Starting WoL listener on port %d, waiting for MAC: %s\n", *wolPort, finalMAC)
