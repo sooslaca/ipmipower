@@ -16,3 +16,4 @@ build:
 ### Common ### Do not modify
 include build-common/home.mk
 include build-common/docker.mk
+include Makefile.local
