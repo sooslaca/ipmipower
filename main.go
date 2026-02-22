@@ -160,15 +160,21 @@ func webHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Get current power status
 	isPowered, err := getPowerStatus(host, username, password, port)
+	var statusStr string
+
+	// Handle error by setting status to "Unknown" and isPowered to false
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Error getting power status: %v", err), http.StatusInternalServerError)
-		return
+		log.Printf("Error getting power status: %v", err)
+		isPowered = false // Default to powered off when there's an error
+		statusStr = "Unknown"
+	} else {
+		statusStr = getStatusString(isPowered)
 	}
 
 	// Prepare data for template
 	data := WebPageData{
 		Host:      host,
-		Status:    getStatusString(isPowered),
+		Status:    statusStr,
 		IsPowered: isPowered,
 	}
 
@@ -202,6 +208,11 @@ func webHandler(w http.ResponseWriter, r *http.Request) {
             color: #721c24;
             border: 1px solid #f5c6cb;
         }
+        .unknown {
+            background-color: #fff3cd;
+            color: #856404;
+            border: 1px solid #ffeaa7;
+        }
         button {
             background-color: #007bff;
             color: white;
@@ -229,7 +240,7 @@ func webHandler(w http.ResponseWriter, r *http.Request) {
 </head>
 <body>
     <h1>IPMI Power Control</h1>
-    <div class="status {{if .IsPowered}}on{{else}}off{{end}}">
+    <div class="status {{if eq .Status "ON"}}on{{else if eq .Status "Unknown"}}unknown{{else}}off{{end}}">
         <h2>Host: {{.Host}}</h2>
         <p>Power Status: <strong>{{.Status}}</strong></p>
     </div>
@@ -249,6 +260,15 @@ func webHandler(w http.ResponseWriter, r *http.Request) {
     <div style="margin-top: 30px; font-size: 14px; color: #666;">
         <p>Current time: {{.Time}}</p>
     </div>
+
+    {{if eq .Status "Unknown"}}
+    <script>
+        // Refresh the page every 1 second when status is Unknown
+        setTimeout(function() {
+            window.location.reload();
+        }, 1000);
+    </script>
+    {{end}}
 </body>
 </html>
 `
