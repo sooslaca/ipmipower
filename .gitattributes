@@ -1,1 +1,1 @@
-.mise filter=redact diff=redact
+.mise/* filter=redact diff=redact
