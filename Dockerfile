@@ -7,7 +7,7 @@ COPY . ./
 
 RUN go mod download
 
-RUN CGO_ENABLED=0 go build -o /go/bin/ipmipower -v -trimpath -ldflags "-s -w" .
+RUN CGO_ENABLED=0 go build -o /go/bin/ipmipower -v -trimpath -ldflags "-s -w" ./cmd/ipmipower
 
 
 

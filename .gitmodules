@@ -1,3 +1,0 @@
-[submodule "build-common"]
-	path = build-common
-	url = https://gitlab.com/sooslaca/build-common.git

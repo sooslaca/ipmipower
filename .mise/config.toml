@@ -1,0 +1,18 @@
+[env]
+IMAGENAME = "laca/ipmipower"
+
+[task_config]
+#includes = ["git::https://gitlab.com/sooslaca/mise.git//shared-tasks/docker"]
+includes = [
+  "~/.config/mise/shared-tasks/golang",
+  "~/.config/mise/shared-tasks/docker",
+]
+
+[tasks.build]
+alias = "default"
+env.GO_SOURCE = "./cmd/ipmipower"
+env.GO_BINARY = "bin/ipmipower"
+
+[tasks.clean]
+description = "Cleans binary output"
+run = "rm -rf bin"
