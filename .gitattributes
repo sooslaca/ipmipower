@@ -1,1 +1,1 @@
-.mise/* filter=redact diff=redact
+/.mise/config.toml filter=redact diff=redact
