@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"html/template"
@@ -9,11 +10,23 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
+	"runtime/debug"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/bougou/go-ipmi"
 )
+
+// guard logs a panic instead of letting it take down the whole process. An
+// unrecovered panic exits with status 2, which systemd reports as
+// "code=exited, status=2/INVALIDARGUMENT".
+func guard(where string) {
+	if r := recover(); r != nil {
+		log.Printf("panic in %s: %v\n%s", where, r, debug.Stack())
+	}
+}
 
 // getEnvOrDefault returns the value of the environment variable with the given name,
 // or the default value if the environment variable is not set.
@@ -152,6 +165,8 @@ type WebPageData struct {
 
 // webHandler handles the main web page
 func webHandler(w http.ResponseWriter, r *http.Request) {
+	defer guard("webHandler")
+
 	// Get configuration from environment variables
 	host := getEnvOrDefault("IPMI_HOST", "192.168.0.1")
 	username := getEnvOrDefault("IPMI_USERNAME", "admin")
@@ -296,6 +311,8 @@ func webHandler(w http.ResponseWriter, r *http.Request) {
 
 // powerOnHandler handles the power on command
 func powerOnHandler(w http.ResponseWriter, r *http.Request) {
+	defer guard("powerOnHandler")
+
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -379,17 +396,21 @@ func main() {
 		return
 	}
 
+	// systemd sends SIGTERM on `systemctl stop`. Without a handler the runtime
+	// kills the process with the signal, so the stop is not graceful and
+	// systemd reports the service as killed rather than cleanly stopped.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	// Set up web server routes
 	http.HandleFunc("/", webHandler)
 	http.HandleFunc("/poweron", powerOnHandler)
 
-	// Start web server in a separate goroutine if not in WoL-only mode
-	go func() {
-		fmt.Printf("Starting web server on port %d\n", *webPort)
-		if err := http.ListenAndServe(fmt.Sprintf(":%d", *webPort), nil); err != nil {
-			log.Fatalf("Web server error: %v", err)
-		}
-	}()
+	server := &http.Server{
+		Addr:              fmt.Sprintf(":%d", *webPort),
+		Handler:           http.DefaultServeMux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
 
 	// WoL mode: Listen for magic packets
 	fmt.Printf("Starting WoL listener on port %d, waiting for MAC: %s\n", *wolPort, finalMAC)
@@ -404,26 +425,93 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to listen on UDP port %d: %v", *wolPort, err)
 	}
-	defer conn.Close()
 
 	fmt.Printf("Listening for WoL packets on port %d...\n", *wolPort)
 
+	// errCh carries the first failure that should end the program. It is
+	// buffered for both senders so neither goroutine can block on shutdown.
+	errCh := make(chan error, 2)
+	wolDone := make(chan struct{})
+
+	go func() {
+		defer close(wolDone)
+		if err := listenWoL(conn, targetMAC, finalMAC, finalHost, finalUsername, finalPassword, *port); err != nil {
+			errCh <- err
+		}
+	}()
+
+	go func() {
+		fmt.Printf("Starting web server on port %d\n", *webPort)
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- fmt.Errorf("web server error: %w", err)
+		}
+	}()
+
+	// Wait for either a shutdown signal or one of the listeners failing.
+	var failure error
+	select {
+	case <-ctx.Done():
+		fmt.Println("Signal received, shutting down...")
+	case failure = <-errCh:
+	}
+
+	// Closing the socket unblocks the ReadFromUDP call in listenWoL so its
+	// goroutine can return.
+	if err := conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		log.Printf("Error closing WoL socket: %v", err)
+	}
+
+	// Let in-flight requests finish, then let an in-flight power-on command
+	// complete before exiting.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Printf("Web server shutdown: %v", err)
+	}
+
+	select {
+	case <-wolDone:
+	case <-time.After(10 * time.Second):
+		log.Println("Timed out waiting for WoL listener to stop")
+	}
+
+	if failure != nil {
+		log.Fatalf("%v", failure)
+	}
+
+	fmt.Println("Shutdown complete")
+}
+
+// listenWoL powers the host on for every valid Wake-on-LAN magic packet read
+// from conn. It returns when conn is closed, which is how a shutdown is
+// signalled, or if the socket fails in a way that cannot be recovered from.
+func listenWoL(conn *net.UDPConn, targetMAC []byte, macLabel string, host string, username string, password string, port int) error {
 	buffer := make([]byte, 1024) // Buffer to store incoming data
 	for {
 		n, clientAddr, err := conn.ReadFromUDP(buffer)
 		if err != nil {
+			// The socket is closed on shutdown: a clean exit, not an error.
+			if errors.Is(err, net.ErrClosed) {
+				return nil
+			}
 			log.Printf("Error reading UDP message: %v", err)
+			// Back off so a persistent error cannot spin the loop and flood the log.
+			time.Sleep(100 * time.Millisecond)
 			continue
 		}
 
 		// Check if the received packet is a valid WoL magic packet for our target MAC
 		if n >= 102 && isValidWOLPacket(buffer[:102], targetMAC) {
-			fmt.Printf("Received valid WoL packet from %s for MAC %s\n", clientAddr, finalMAC)
+			fmt.Printf("Received valid WoL packet from %s for MAC %s\n", clientAddr, macLabel)
 
-			// Execute IPMI power on command
-			if err := sendIPMIPowerOn(finalHost, finalUsername, finalPassword, *port); err != nil {
-				log.Printf("Error executing IPMI command: %v", err)
-			}
+			// Execute IPMI power on command. A panic here would otherwise take
+			// the whole service down, so keep serving the next packet.
+			func() {
+				defer guard("sendIPMIPowerOn")
+				if err := sendIPMIPowerOn(host, username, password, port); err != nil {
+					log.Printf("Error executing IPMI command: %v", err)
+				}
+			}()
 		}
 	}
 }
